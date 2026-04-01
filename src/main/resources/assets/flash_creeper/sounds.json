@@ -1,0 +1,12 @@
+{
+  "flash_ringing": {
+    "sounds": [
+      {
+        "name": "entity.elder_guardian.curse",
+        "type": "event",
+        "volume": 1.5,
+        "pitch": 0.6
+      }
+    ]
+  }
+}
