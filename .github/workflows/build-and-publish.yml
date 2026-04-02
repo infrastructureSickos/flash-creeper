@@ -1,0 +1,162 @@
+name: Build and Publish
+
+on:
+  push:
+    branches: [ main ]
+    tags:
+      - 'v*'
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    outputs:
+      mod_version: ${{ steps.props.outputs.mod_version }}
+      modrinth_id: ${{ steps.props.outputs.modrinth_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read mod properties
+        id: props
+        run: |
+          MOD_VERSION=$(grep '^mod_version=' gradle.properties | cut -d= -f2)
+          MODRINTH_ID=$(grep '^modrinth_id=' gradle.properties | cut -d= -f2)
+          echo "mod_version=${MOD_VERSION}" >> "$GITHUB_OUTPUT"
+          echo "modrinth_id=${MODRINTH_ID}" >> "$GITHUB_OUTPUT"
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Gradle
+        uses: gradle/actions/setup-gradle@v3
+
+      - name: Build jar
+        run: ./gradlew build
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: flash-creeper-jar
+          path: build/libs/flash_creeper-${{ steps.props.outputs.mod_version }}.jar
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+    outputs:
+      modrinth_version_id: ${{ steps.publish.outputs.modrinth_version_id }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download jar artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: flash-creeper-jar
+          path: build/libs/
+
+      - name: Publish to Modrinth
+        id: publish
+        env:
+          MODRINTH_API_TOKEN: ${{ secrets.MODRINTH_API_TOKEN }}
+          MOD_VERSION: ${{ needs.build.outputs.mod_version }}
+          MODRINTH_ID: ${{ needs.build.outputs.modrinth_id }}
+        run: |
+          set -euo pipefail
+
+          TAG="${GITHUB_REF_NAME}"
+          JAR_FILE="build/libs/flash_creeper-${MOD_VERSION}.jar"
+
+          DATA=$(python3 -c "
+          import json
+          data = {
+              'name': 'Flash Creeper ${TAG}',
+              'version_number': '${TAG}',
+              'version_type': 'release',
+              'project_id': '${MODRINTH_ID}',
+              'dependencies': [],
+              'game_versions': ['1.20.1'],
+              'loaders': ['forge'],
+              'featured': True,
+              'file_parts': ['jar']
+          }
+          print(json.dumps(data))
+          ")
+
+          RESPONSE=$(curl -sf \
+            -H "Authorization: ${MODRINTH_API_TOKEN}" \
+            -F "data=${DATA}" \
+            -F "jar=@${JAR_FILE};type=application/java-archive" \
+            "https://api.modrinth.com/v2/version")
+
+          MODRINTH_VERSION_ID=$(echo "$RESPONSE" | python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          echo "Published to Modrinth: version_id=${MODRINTH_VERSION_ID}"
+          echo "modrinth_version_id=${MODRINTH_VERSION_ID}" >> "$GITHUB_OUTPUT"
+
+  update-modpack:
+    needs: [build, publish]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/v')
+
+    steps:
+      - name: Checkout modpack repo
+        uses: actions/checkout@v4
+        with:
+          repository: brooswit/minecraft-modpack
+          token: ${{ secrets.INFRA_BOT_PAT }}
+          path: minecraft-modpack
+
+      - name: Update mods-list.json
+        env:
+          MODRINTH_VERSION_ID: ${{ needs.publish.outputs.modrinth_version_id }}
+        run: |
+          set -euo pipefail
+          cd minecraft-modpack
+
+          python3 - <<'PYEOF'
+          import json, os, sys
+
+          version_id = os.environ['MODRINTH_VERSION_ID']
+          path = 'mods-list.json'
+
+          with open(path) as f:
+              mods = json.load(f)
+
+          entry_found = False
+          for mod in mods:
+              if mod.get('modrinth_project_id') == 'flash-creeper':
+                  mod['version_id'] = version_id
+                  entry_found = True
+                  break
+
+          if not entry_found:
+              mods.append({
+                  'name': 'Flash Creeper',
+                  'modrinth_project_id': 'flash-creeper',
+                  'version_id': version_id
+              })
+              print(f'Added new entry for flash-creeper: {version_id}')
+          else:
+              print(f'Updated flash-creeper to version_id: {version_id}')
+
+          with open(path, 'w') as f:
+              json.dump(mods, f, indent=2)
+              f.write('\n')
+          PYEOF
+
+      - name: Commit and push
+        env:
+          MODRINTH_VERSION_ID: ${{ needs.publish.outputs.modrinth_version_id }}
+        run: |
+          cd minecraft-modpack
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add mods-list.json
+          git commit -m "chore: update flash-creeper to modrinth version ${MODRINTH_VERSION_ID}"
+          git push
