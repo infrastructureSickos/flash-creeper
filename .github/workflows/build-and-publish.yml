@@ -105,58 +105,10 @@ jobs:
     if: startsWith(github.ref, 'refs/tags/v')
 
     steps:
-      - name: Checkout modpack repo
-        uses: actions/checkout@v4
+      - name: Trigger modpack update
+        uses: peter-evans/repository-dispatch@v3
         with:
-          repository: brooswit/minecraft-modpack
-          token: ${{ secrets.INFRA_BOT_PAT }}
-          path: minecraft-modpack
-
-      - name: Update mods-list.json
-        env:
-          MODRINTH_VERSION_ID: ${{ needs.publish.outputs.modrinth_version_id }}
-        run: |
-          set -euo pipefail
-          cd minecraft-modpack
-
-          python3 - <<'PYEOF'
-          import json, os, sys
-
-          version_id = os.environ['MODRINTH_VERSION_ID']
-          path = 'mods-list.json'
-
-          with open(path) as f:
-              mods = json.load(f)
-
-          entry_found = False
-          for mod in mods:
-              if mod.get('modrinth_project_id') == 'flash-creeper':
-                  mod['version_id'] = version_id
-                  entry_found = True
-                  break
-
-          if not entry_found:
-              mods.append({
-                  'name': 'Flash Creeper',
-                  'modrinth_project_id': 'flash-creeper',
-                  'version_id': version_id
-              })
-              print(f'Added new entry for flash-creeper: {version_id}')
-          else:
-              print(f'Updated flash-creeper to version_id: {version_id}')
-
-          with open(path, 'w') as f:
-              json.dump(mods, f, indent=2)
-              f.write('\n')
-          PYEOF
-
-      - name: Commit and push
-        env:
-          MODRINTH_VERSION_ID: ${{ needs.publish.outputs.modrinth_version_id }}
-        run: |
-          cd minecraft-modpack
-          git config user.name  "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git add mods-list.json
-          git commit -m "chore: update flash-creeper to modrinth version ${MODRINTH_VERSION_ID}"
-          git push
+          token: ${{ secrets.MODPACK_DISPATCH_TOKEN }}
+          repository: infrastructureSickos/minecraft-modpack
+          event-type: flash-creeper-updated
+          client-payload: '{"version": "${{ github.ref_name }}"}'
